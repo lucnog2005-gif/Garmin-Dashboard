@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -291,7 +292,7 @@ with col12:
     st.metric("Risco de fadiga", risk)
 
 # ============================================
-# FITNESS / FATIGUE / FORM (COM GRÁFICO TIPO STRAVA)
+# FITNESS / FATIGUE / FORM (COM FILTRO DE PERÍODO)
 # ============================================
 
 st.divider()
@@ -316,22 +317,45 @@ with col15:
         status = "🔴 Recuperação necessária"
     st.metric("Form (TSB)", f"{round(form, 1)} ({status})")
 
-# RENDERIZANDO O GRÁFICO CONTINUO + PROJEÇÃO
+# RENDERIZANDO O GRÁFICO CONTINUO + PROJEÇÃO COM FILTRO
 if not history_df.empty:
+
+    # Seletor de período interativo
+    periodo_opcao = st.radio(
+        "Selecione o período de visualização do gráfico:",
+        options=["30 dias", "60 dias", "90 dias", "Todo o ciclo (180 dias)"],
+        index=3,  # Padrão: Todo o ciclo
+        horizontal=True,
+        key="radio_fff"
+    )
+
+    dias_map = {
+        "30 dias": 30,
+        "60 dias": 60,
+        "90 dias": 90,
+        "Todo o ciclo (180 dias)": 180
+    }
+
+    dias_filtro = dias_map[periodo_opcao]
+    data_limite = datetime.now() - timedelta(days=dias_filtro)
+
+    # Filtra o DataFrame apenas para exibição no gráfico (o cálculo Banister mantém a base completa)
+    history_filtered = history_df[history_df["date"] >= data_limite].copy()
+
     proj_df = calculate_projection(history_df, future_schedule)
     fig_fff = go.Figure()
 
-    # --- HISTÓRICO REAL (LINHAS SÓLIDAS) ---
+    # --- HISTÓRICO REAL FILTRADO (LINHAS SÓLIDAS) ---
     fig_fff.add_trace(go.Scatter(
-        x=history_df["date"], y=history_df["fitness"],
+        x=history_filtered["date"], y=history_filtered["fitness"],
         mode="lines", name="Fitness (CTL)", line=dict(color="#FF5722", width=2.5)
     ))
     fig_fff.add_trace(go.Scatter(
-        x=history_df["date"], y=history_df["fatigue"],
+        x=history_filtered["date"], y=history_filtered["fatigue"],
         mode="lines", name="Fatigue (ATL)", line=dict(color="#9E9E9E", width=1.5)
     ))
     fig_fff.add_trace(go.Scatter(
-        x=history_df["date"], y=history_df["form"],
+        x=history_filtered["date"], y=history_filtered["form"],
         mode="lines", name="Form (TSB)", line=dict(color="#00796B", width=2.5)
     ))
 
@@ -436,11 +460,11 @@ with col22:
         st.error("🔴 Recovery compromised")
 
 # ============================================
-# HISTORY & CHARTS
+# HISTORY & CHARTS (COM FILTRO DE PERÍODO)
 # ============================================
 
 st.divider()
-st.header("📉 Tendência semanal Garmin")
+st.header("📉 Tendência Garmin")
 
 available_metrics = [
     "steps",
@@ -452,15 +476,36 @@ available_metrics = [
     "training_load"
 ]
 
-selected_metric = st.selectbox("Escolha uma métrica", available_metrics)
+col_m1, col_m2 = st.columns([1, 2])
+
+with col_m1:
+    selected_metric = st.selectbox("Escolha uma métrica", available_metrics)
+
+with col_m2:
+    periodo_metrica = st.radio(
+        "Período:",
+        options=["30 dias", "60 dias", "90 dias", "Todo o ciclo (180 dias)"],
+        index=0,  # Padrão 30 dias para métricas pontuais
+        horizontal=True,
+        key="radio_metric"
+    )
 
 if not history_df.empty and selected_metric in history_df.columns:
+    dias_m_map = {
+        "30 dias": 30,
+        "60 dias": 60,
+        "90 dias": 90,
+        "Todo o ciclo (180 dias)": 180
+    }
+    limite_m = datetime.now() - timedelta(days=dias_m_map[periodo_metrica])
+    history_m_filtered = history_df[history_df["date"] >= limite_m]
+
     fig = px.line(
-        history_df,
+        history_m_filtered,
         x="date",
         y=selected_metric,
         markers=True,
-        title=f"{selected_metric} - histórico recente"
+        title=f"{selected_metric} - histórico ({periodo_metrica})"
     )
     st.plotly_chart(fig, use_container_width=True)
 
