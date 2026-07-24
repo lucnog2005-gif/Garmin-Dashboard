@@ -6,29 +6,35 @@ TOKEN_DIR = os.path.expanduser("~/.garminconnect")
 
 @st.cache_resource
 def get_garmin_client():
-    """Gerencia a conexão e reutiliza os tokens em disco para evitar erro 429."""
-    # Garante que o diretório de tokens exista
+    """Gerencia a conexão e reutiliza os tokens do arquivo garmin_tokens.json."""
     os.makedirs(TOKEN_DIR, exist_ok=True)
 
+    # Se os tokens estiverem nos Secrets, grava o arquivo garmin_tokens.json na nuvem
+    if "GARMIN_TOKENS_JSON" in st.secrets:
+        try:
+            tokens_path = os.path.join(TOKEN_DIR, "garmin_tokens.json")
+            with open(tokens_path, "w") as f:
+                f.write(st.secrets["GARMIN_TOKENS_JSON"])
+        except Exception as e:
+            st.warning(f"Não foi possível gravar os tokens: {e}")
+
     try:
-        # Tenta reusar sessão existente pelos tokens
+        # Tenta login reutilizando a sessão salva
         garmin = Garmin()
         garmin.login(TOKEN_DIR)
         return garmin
     except Exception:
-        # Fallback para credenciais do .env ou st.secrets
+        # Fallback para login direto por credenciais
         email = st.secrets.get("GARMIN_EMAIL") or os.getenv("GARMIN_EMAIL")
         password = st.secrets.get("GARMIN_PASSWORD") or os.getenv("GARMIN_PASSWORD")
         
         if not email or not password:
-            st.error("Credenciais não encontradas no .env ou st.secrets.")
+            st.error("Credenciais ou tokens não encontrados no st.secrets.")
             return None
             
         try:
             garmin = Garmin(email, password)
-            garmin.login()
-            # Salva tokens em disco para requisições futuras
-            garmin.garth.dump(TOKEN_DIR)
+            garmin.login(TOKEN_DIR)
             return garmin
         except GarminConnectTooManyRequestsError:
             st.error("Garmin Rate Limit (429). Aguarde alguns minutos.")
