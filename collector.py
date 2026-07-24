@@ -21,6 +21,22 @@ def get_first_valid(data, fields, default=0):
     return default
 
 
+def fetch_valid_sleep_seconds(client, day_str):
+    """
+    Busca os segundos de sono para uma data. 
+    Se a data não tiver registro (como o dia de hoje), busca a noite anterior.
+    """
+    try:
+        sleep_data = client.get_sleep_data(day_str)
+        if isinstance(sleep_data, dict):
+            dto = sleep_data.get("dailySleepDTO", {})
+            if dto and dto.get("totalSleepSeconds"):
+                return dto.get("totalSleepSeconds")
+    except Exception:
+        pass
+    return 0
+
+
 # ============================================
 # HISTÓRICO DE ATIVIDADES
 # ============================================
@@ -57,7 +73,7 @@ def get_historical_activities(_client, days=30):
             last_activity = activities[0] if activities else {}
 
             # ====================================
-            # SONO
+            # SONO (COM FALLBACK PARA O DIA DE HOJE)
             # ====================================
             sleep_seconds = get_first_valid(
                 stats,
@@ -70,6 +86,12 @@ def get_historical_activities(_client, days=30):
                 ],
                 0
             )
+
+            # Se for hoje (i = 0) e o registro de sono ainda for 0, busca a noite recém-concluída (ontem)
+            if (not sleep_seconds or sleep_seconds == 0) and i == 0:
+                yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+                sleep_seconds = fetch_valid_sleep_seconds(_client, yesterday_str)
+
             sleep_hours = round(float(sleep_seconds) / 3600, 2)
 
             # ====================================
@@ -183,6 +205,18 @@ def collect_all_data():
         stats = client.get_user_summary(today)
     except Exception:
         stats = {}
+
+    # Garante que o stats de hoje contenha as horas de sono caso venha 0
+    current_sleep = get_first_valid(
+        stats,
+        ["measurableAsleepDuration", "sleepingSeconds", "sleepSeconds", "dailySleepSeconds", "sleepDuration"],
+        0
+    )
+    if not current_sleep or current_sleep == 0:
+        yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        valid_seconds = fetch_valid_sleep_seconds(client, yesterday_str)
+        if valid_seconds:
+            stats["sleepSeconds"] = valid_seconds
 
     try:
         activities = client.get_activities(0, 5)
