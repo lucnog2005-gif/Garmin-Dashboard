@@ -40,6 +40,7 @@ st.set_page_config(
 )
 
 # ============================================
+# ============================================
 # LOAD DATA
 # ============================================
 
@@ -56,6 +57,18 @@ if not history_df.empty and "date" in history_df.columns:
     history_df["date"] = pd.to_datetime(history_df["date"])
     history_df = history_df.sort_values("date").reset_index(drop=True)
 
+# ------------------------------------------------------------------
+# TRATAMENTO DE CORREÇÃO PARA O SONO (GARMIN API FALLBACK)
+# ------------------------------------------------------------------
+# Se metrics['sleep_hours'] vier zerado/inválido (devido ao dia em aberto na Garmin),
+# pegamos o último valor de sono válido registrado no histórico recente (> 0).
+current_sleep = metrics.get("sleep_hours")
+if not current_sleep or float(current_sleep) == 0:
+    if not history_df.empty and "sleep_hours" in history_df.columns:
+        valid_sleep_series = history_df[history_df["sleep_hours"] > 0]["sleep_hours"]
+        if not valid_sleep_series.empty:
+            latest_sleep = valid_sleep_series.iloc[-1]
+            metrics["sleep_hours"] = float(latest_sleep)
 # ============================================
 # PERFORMANCE METRICS
 # ============================================
