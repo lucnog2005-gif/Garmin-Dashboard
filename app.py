@@ -17,7 +17,9 @@ from analysis import (
     calculate_fitness,
     calculate_fatigue,
     calculate_form,
-    ai_coach_messages
+    ai_coach_messages,
+    calculate_hrv_status,
+    calculate_efficiency_factor
 )
 
 from recovery_engine import (
@@ -39,10 +41,8 @@ def calculate_projection(history_df, future_schedule):
     if history_df.empty or not future_schedule:
         return pd.DataFrame()
 
-    # Prepara cópia do histórico ordenado
     df = history_df.copy()
     if "fitness" not in df.columns or "fatigue" not in df.columns:
-        # Se fitness/fatigue ainda não foram injetados no dataframe, calcula
         df["fitness"] = [calculate_fitness(df.iloc[:i+1]) for i in range(len(df))]
         df["fatigue"] = [calculate_fatigue(df.iloc[:i+1]) for i in range(len(df))]
 
@@ -60,7 +60,6 @@ def calculate_projection(history_df, future_schedule):
 
         load = float(item.get("training_load", 0))
 
-        # Modelo Banister de Decay
         last_ctl = last_ctl + (load - last_ctl) / 42.0
         last_atl = last_atl + (load - last_atl) / 7.0
         form = last_ctl - last_atl
@@ -101,9 +100,7 @@ if not history_df.empty and "date" in history_df.columns:
     history_df["date"] = pd.to_datetime(history_df["date"])
     history_df = history_df.sort_values("date").reset_index(drop=True)
 
-# ------------------------------------------------------------------
 # TRATAMENTO DE SONO
-# ------------------------------------------------------------------
 current_sleep = metrics.get("sleep_hours")
 
 if not current_sleep or float(current_sleep) == 0:
@@ -119,6 +116,9 @@ if not history_df.empty and "sleep_hours" in history_df.columns and current_slee
 
 metrics = prepare_metrics(metrics)
 save_metrics(metrics)
+
+# CÁLCULO DE EFICIÊNCIA AERÓBICA (FASE 1)
+history_df = calculate_efficiency_factor(history_df)
 
 # ============================================
 # PERFORMANCE METRICS (APÓS TRATAMENTO)
@@ -140,12 +140,13 @@ if not history_df.empty:
     history_df["form"] = history_df["fitness"] - history_df["fatigue"]
 
 # ============================================
-# RECOVERY ENGINE
+# RECOVERY ENGINE & HRV STATUS (FASE 1)
 # ============================================
 
 sleep_debt = calculate_sleep_debt(history_df)
 strain_score = calculate_strain_score(metrics)
 readiness_score = calculate_readiness_score(recovery_score, sleep_debt, form)
+hrv_data = calculate_hrv_status(metrics, history_df)
 
 body_battery = calculate_body_battery(
     recovery_score,
@@ -268,13 +269,13 @@ st.header("🎯 Ação do dia")
 st.info(recommendation)
 
 # ============================================
-# ADVANCED METRICS
+# ADVANCED METRICS & HRV STATUS (FASE 1)
 # ============================================
 
 st.divider()
-st.header("📈 Indicadores avançados")
+st.header("📈 Indicadores avançados & Fisiologia Autônoma")
 
-col10, col11, col12 = st.columns(3)
+col10, col11, col12, col_hrv = st.columns(4)
 
 with col10:
     st.metric("Recovery Score", round(recovery_score, 1))
@@ -291,8 +292,15 @@ with col12:
         risk = "BAIXO"
     st.metric("Risco de fadiga", risk)
 
+with col_hrv:
+    st.metric(
+        "🫀 HRV Status", 
+        hrv_data["status"], 
+        f"{hrv_data['hrv_value']} ms (Média: {hrv_data['baseline_avg']} ms)"
+    )
+
 # ============================================
-# FITNESS / FATIGUE / FORM (COM FILTRO DE PERÍODO)
+# FITNESS / FATIGUE / FORM & PROJEÇÃO
 # ============================================
 
 st.divider()
@@ -317,14 +325,11 @@ with col15:
         status = "🔴 Recuperação necessária"
     st.metric("Form (TSB)", f"{round(form, 1)} ({status})")
 
-# RENDERIZANDO O GRÁFICO CONTINUO + PROJEÇÃO COM FILTRO
 if not history_df.empty:
-
-    # Seletor de período interativo
     periodo_opcao = st.radio(
         "Selecione o período de visualização do gráfico:",
         options=["30 dias", "60 dias", "90 dias", "Todo o ciclo (180 dias)"],
-        index=3,  # Padrão: Todo o ciclo
+        index=3,
         horizontal=True,
         key="radio_fff"
     )
@@ -339,13 +344,11 @@ if not history_df.empty:
     dias_filtro = dias_map[periodo_opcao]
     data_limite = datetime.now() - timedelta(days=dias_filtro)
 
-    # Filtra o DataFrame apenas para exibição no gráfico (o cálculo Banister mantém a base completa)
     history_filtered = history_df[history_df["date"] >= data_limite].copy()
 
     proj_df = calculate_projection(history_df, future_schedule)
     fig_fff = go.Figure()
 
-    # --- HISTÓRICO REAL FILTRADO (LINHAS SÓLIDAS) ---
     fig_fff.add_trace(go.Scatter(
         x=history_filtered["date"], y=history_filtered["fitness"],
         mode="lines", name="Fitness (CTL)", line=dict(color="#FF5722", width=2.5)
@@ -359,7 +362,6 @@ if not history_df.empty:
         mode="lines", name="Form (TSB)", line=dict(color="#00796B", width=2.5)
     ))
 
-    # --- PROJEÇÃO CALENDÁRIO (LINHAS PONTILHADAS) ---
     if not proj_df.empty:
         last_real = history_df.iloc[[-1]]
         proj_extended = pd.concat([last_real, proj_df], ignore_index=True)
@@ -380,7 +382,6 @@ if not history_df.empty:
             showlegend=False
         ))
 
-    # Faixa verde de Sweet Spot para o dia da prova (+10 a +25)
     fig_fff.add_hrect(
         y0=10, y1=25, fillcolor="green", opacity=0.1, line_width=0,
         annotation_text="Zona Ideal de Prova (Freshness)", annotation_position="top left"
@@ -396,6 +397,62 @@ if not history_df.empty:
     )
 
     st.plotly_chart(fig_fff, use_container_width=True)
+
+# ============================================
+# EFFICIENCY FACTOR - EF (FASE 1)
+# ============================================
+
+st.divider()
+st.header("⚡ Fator de Eficiência Aeróbica (Efficiency Factor - EF)")
+st.caption("Mede o quão rápido você corre para o mesmo custo cardíaco (Pace / FC Média). Valores crescentes indicam ganho de economia de corrida.")
+
+if not history_df.empty and "efficiency_factor" in history_df.columns:
+    periodo_ef_opcao = st.radio(
+        "Selecione o período para o Fator de Eficiência:",
+        options=["30 dias", "60 dias", "90 dias", "Todo o ciclo (180 dias)"],
+        index=0,
+        horizontal=True,
+        key="radio_ef"
+    )
+
+    dias_ef_map = {
+        "30 dias": 30,
+        "60 dias": 60,
+        "90 dias": 90,
+        "Todo o ciclo (180 dias)": 180
+    }
+
+    limite_ef = datetime.now() - timedelta(days=dias_ef_map[periodo_ef_opcao])
+    ef_df = history_df[(history_df["efficiency_factor"] > 0) & (history_df["date"] >= limite_ef)].copy()
+
+    if not ef_df.empty:
+        fig_ef = px.line(
+            ef_df,
+            x="date",
+            y="efficiency_factor",
+            markers=True,
+            title=f"Evolução do Efficiency Factor (EF) - ({periodo_ef_opcao})",
+            labels={"efficiency_factor": "EF (m/min por bpm)", "date": "Data"}
+        )
+        ef_df["ef_smooth"] = ef_df["efficiency_factor"].rolling(window=7, min_periods=1).mean()
+        fig_ef.add_trace(go.Scatter(
+            x=ef_df["date"],
+            y=ef_df["ef_smooth"],
+            mode="lines",
+            name="Tendência (Média 7 treinos)",
+            line=dict(color="#2196F3", width=3)
+        ))
+        st.plotly_chart(fig_ef, use_container_width=True)
+
+        current_ef = ef_df["efficiency_factor"].iloc[-1]
+        avg_ef = ef_df["efficiency_factor"].mean()
+        delta_ef = round(current_ef - avg_ef, 2)
+
+        col_ef1, col_ef2 = st.columns(2)
+        col_ef1.metric("EF Treino Recente", f"{current_ef:.2f}")
+        col_ef2.metric(f"Média EF ({periodo_ef_opcao})", f"{avg_ef:.2f}", delta=f"{delta_ef:+.2f}")
+    else:
+        st.info("Aguardando registros com Pace e FC Média para calcular o Efficiency Factor no período selecionado.")
 
 # ============================================
 # PERFORMANCE TREND
@@ -460,7 +517,7 @@ with col22:
         st.error("🔴 Recovery compromised")
 
 # ============================================
-# HISTORY & CHARTS (COM FILTRO DE PERÍODO)
+# HISTORY & CHARTS
 # ============================================
 
 st.divider()
@@ -473,7 +530,8 @@ available_metrics = [
     "resting_hr",
     "vo2max",
     "training_effect",
-    "training_load"
+    "training_load",
+    "efficiency_factor"
 ]
 
 col_m1, col_m2 = st.columns([1, 2])
@@ -485,7 +543,7 @@ with col_m2:
     periodo_metrica = st.radio(
         "Período:",
         options=["30 dias", "60 dias", "90 dias", "Todo o ciclo (180 dias)"],
-        index=0,  # Padrão 30 dias para métricas pontuais
+        index=0,
         horizontal=True,
         key="radio_metric"
     )
@@ -521,4 +579,4 @@ if not history_df.empty:
 # ============================================
 
 st.divider()
-st.caption("Garmin AI Performance System • v6.0")
+st.caption("Garmin AI Performance System • v6.1 (Fase 1 completa)")

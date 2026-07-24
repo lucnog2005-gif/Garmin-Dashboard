@@ -1,5 +1,5 @@
+import numpy as np
 import pandas as pd
-
 
 # ============================================
 # INSIGHTS
@@ -196,3 +196,103 @@ def ai_coach_messages(metrics, recovery_score, acwr, form):
         messages.append("🔴 Capacidade aeróbica baixa")
 
     return messages
+
+
+# ============================================
+# FASE 1: HRV STATUS & EFFICIENCY FACTOR (EF)
+# ============================================
+
+def calculate_hrv_status(metrics, history_df):
+    """
+    Calcula o estado da Variabilidade da Frequência Cardíaca (HRV).
+    Compara o valor recente com a linha de base (baseline de 28 dias).
+    """
+    current_hrv = metrics.get("hrv_last_night") or metrics.get("hrv_avg")
+    
+    if not current_hrv and not history_df.empty and "hrv" in history_df.columns:
+        valid_hrv = history_df[history_df["hrv"] > 0]["hrv"]
+        if not valid_hrv.empty:
+            current_hrv = float(valid_hrv.iloc[-1])
+            
+    if not current_hrv:
+        return {
+            "status": "Sem dados",
+            "hrv_value": 0,
+            "baseline_avg": 0,
+            "message": "Dados de HRV indisponíveis na sincronização."
+        }
+        
+    # Cálculo da linha de base (Média móvel de 28 dias)
+    if not history_df.empty and "hrv" in history_df.columns and len(history_df) >= 7:
+        valid_history = history_df[history_df["hrv"] > 0]["hrv"]
+        baseline_avg = valid_history.tail(28).mean() if len(valid_history) >= 28 else valid_history.mean()
+        std_dev = valid_history.tail(28).std() if len(valid_history) >= 28 else 5.0
+    else:
+        baseline_avg = current_hrv
+        std_dev = 5.0
+
+    # Faixa normal de variação (baseline range ± 0.75 desvio padrão)
+    lower_bound = baseline_avg - (0.75 * std_dev)
+    upper_bound = baseline_avg + (0.75 * std_dev)
+
+    if current_hrv >= lower_bound:
+        status = "🟢 Equilibrado"
+        message = "Sistema Nervoso Autônomo recuperado e pronto para absorver carga."
+    elif current_hrv < lower_bound and current_hrv >= lower_bound - 5:
+        status = "🟡 Desbalanço leve"
+        message = "Sinal inicial de fadiga central ou estresse residual."
+    else:
+        status = "🔴 Baixo / Desbalanceado"
+        message = "Fadiga do Sistema Nervoso Autônomo alta. Atenção ao descanso."
+
+    return {
+        "status": status,
+        "hrv_value": round(current_hrv, 1),
+        "baseline_avg": round(baseline_avg, 1),
+        "lower_bound": round(lower_bound, 1),
+        "upper_bound": round(upper_bound, 1),
+        "message": message
+    }
+
+
+def calculate_efficiency_factor(history_df):
+    """
+    Calcula o Fator de Eficiência Aeróbica (EF = Normalization Pace / Heart Rate Média).
+    Para corrida: EF = (Velocidade em m/min) / FC_média.
+    """
+    if history_df.empty:
+        return pd.DataFrame()
+
+    df = history_df.copy()
+
+    # Tratamento para identificar Pace (min/km) ou Velocidade (km/h)
+    if "avg_pace_min_km" in df.columns and "avg_hr" in df.columns:
+        def pace_to_m_per_min(pace):
+            try:
+                if isinstance(pace, str) and ":" in pace:
+                    m, s = map(float, pace.split(":"))
+                    total_min = m + (s / 60.0)
+                else:
+                    total_min = float(pace)
+                return 1000.0 / total_min if total_min > 0 else 0
+            except:
+                return 0
+
+        df["speed_m_min"] = df["avg_pace_min_km"].apply(pace_to_m_per_min)
+        df["efficiency_factor"] = np.where(
+            df["avg_hr"] > 0,
+            df["speed_m_min"] / df["avg_hr"],
+            0
+        )
+    elif "avg_speed_kmh" in df.columns and "avg_hr" in df.columns:
+        df["speed_m_min"] = (df["avg_speed_kmh"] * 1000.0) / 60.0
+        df["efficiency_factor"] = np.where(
+            df["avg_hr"] > 0,
+            df["speed_m_min"] / df["avg_hr"],
+            0
+        )
+    else:
+        df["efficiency_factor"] = 0.0
+
+    df["efficiency_factor"] = df["efficiency_factor"].round(3)
+    return df
