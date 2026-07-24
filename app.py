@@ -40,15 +40,11 @@ st.set_page_config(
 )
 
 # ============================================
-# ============================================
-# LOAD DATA
+# LOAD & TREAT DATA
 # ============================================
 
 data = collect_all_data()
 metrics = extract_metrics(data)
-
-# Salva métricas obtidas
-save_metrics(metrics)
 
 history = data.get("history", [])
 history_df = pd.DataFrame(history)
@@ -58,19 +54,28 @@ if not history_df.empty and "date" in history_df.columns:
     history_df = history_df.sort_values("date").reset_index(drop=True)
 
 # ------------------------------------------------------------------
-# TRATAMENTO DE CORREÇÃO PARA O SONO (GARMIN API FALLBACK)
+# TRATAMENTO DE SONO (EVITA ZERO DO DIA EM ABERTO DA GARMIN)
 # ------------------------------------------------------------------
-# Se metrics['sleep_hours'] vier zerado/inválido (devido ao dia em aberto na Garmin),
-# pegamos o último valor de sono válido registrado no histórico recente (> 0).
 current_sleep = metrics.get("sleep_hours")
+
+# 1. Se o sono atual vier 0.0 ou None, resgata o último valor válido do histórico recente
 if not current_sleep or float(current_sleep) == 0:
     if not history_df.empty and "sleep_hours" in history_df.columns:
         valid_sleep_series = history_df[history_df["sleep_hours"] > 0]["sleep_hours"]
         if not valid_sleep_series.empty:
-            latest_sleep = valid_sleep_series.iloc[-1]
-            metrics["sleep_hours"] = float(latest_sleep)
+            current_sleep = float(valid_sleep_series.iloc[-1])
+            metrics["sleep_hours"] = current_sleep
+
+# 2. Atualiza a última linha do history_df para não distorcer o cálculo do Sleep Debt
+if not history_df.empty and "sleep_hours" in history_df.columns and current_sleep:
+    if history_df.iloc[-1]["sleep_hours"] == 0:
+        history_df.loc[history_df.index[-1], "sleep_hours"] = float(current_sleep)
+
+# Salva métricas já tratadas no histórico
+save_metrics(metrics)
+
 # ============================================
-# PERFORMANCE METRICS
+# PERFORMANCE METRICS (APÓS TRATAMENTO)
 # ============================================
 
 acwr = calculate_acwr(history)
@@ -120,9 +125,9 @@ st.header("📊 Métricas")
 
 col1, col2, col3 = st.columns(3)
 
-# Tratamento para exibição visual do sono
+# Exibição do sono tratado
 sleep_val = metrics.get("sleep_hours")
-sleep_display = f"{sleep_val} h" if sleep_val is not None else "Sincronizando..."
+sleep_display = f"{round(sleep_val, 2)} h" if sleep_val is not None else "Sincronizando..."
 
 with col1:
     st.metric("😴 Sono", sleep_display)
