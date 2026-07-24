@@ -1,4 +1,5 @@
 import os
+import json
 import streamlit as st
 from garminconnect import Garmin, GarminConnectTooManyRequestsError
 
@@ -6,32 +7,38 @@ TOKEN_DIR = os.path.expanduser("~/.garminconnect")
 
 @st.cache_resource
 def get_garmin_client():
-    """Gerencia a conexão e reutiliza os tokens do arquivo garmin_tokens.json."""
+    """Gerencia a conexão do Garmin Connect utilizando tokens salvos nos Secrets."""
     os.makedirs(TOKEN_DIR, exist_ok=True)
 
-    # Se os tokens estiverem nos Secrets, grava o arquivo garmin_tokens.json na nuvem
+    # 1. Tenta carregar e aplicar o JSON de tokens salvo no st.secrets
     if "GARMIN_TOKENS_JSON" in st.secrets:
         try:
+            tokens_data = st.secrets["GARMIN_TOKENS_JSON"]
+            if isinstance(tokens_data, str):
+                tokens_data = json.loads(tokens_data)
+
+            # Salva no arquivo padrão esperado pelo garth/garminconnect
             tokens_path = os.path.join(TOKEN_DIR, "garmin_tokens.json")
             with open(tokens_path, "w") as f:
-                f.write(st.secrets["GARMIN_TOKENS_JSON"])
+                json.dump(tokens_data, f)
+                
         except Exception as e:
-            st.warning(f"Não foi possível gravar os tokens: {e}")
+            st.warning(f"Aviso ao processar GARMIN_TOKENS_JSON: {e}")
 
+    # 2. Tenta autenticar usando a sessão/tokens já gravados
     try:
-        # Tenta login reutilizando a sessão salva
         garmin = Garmin()
         garmin.login(TOKEN_DIR)
         return garmin
-    except Exception:
-        # Fallback para login direto por credenciais
+    except Exception as err_token:
+        # Se os tokens não funcionarem, tenta usar as credenciais se não estivemos em nuvem
         email = st.secrets.get("GARMIN_EMAIL") or os.getenv("GARMIN_EMAIL")
         password = st.secrets.get("GARMIN_PASSWORD") or os.getenv("GARMIN_PASSWORD")
-        
+
         if not email or not password:
-            st.error("Credenciais ou tokens não encontrados no st.secrets.")
+            st.error("Sessão expirada e nenhuma credencial configurada.")
             return None
-            
+
         try:
             garmin = Garmin(email, password)
             garmin.login(TOKEN_DIR)
