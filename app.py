@@ -1,9 +1,10 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 
 from collector import collect_all_data
-from metrics import extract_metrics
+from metrics import extract_metrics, prepare_metrics
 from storage import save_metrics
 
 from analysis import (
@@ -30,6 +31,51 @@ from performance_trend import (
 )
 
 # ============================================
+# HELPER: CÁLCULO DE PROJEÇÃO (BANISTER MODEL)
+# ============================================
+
+def calculate_projection(history_df, future_schedule):
+    if history_df.empty or not future_schedule:
+        return pd.DataFrame()
+
+    # Prepara cópia do histórico ordenado
+    df = history_df.copy()
+    if "fitness" not in df.columns or "fatigue" not in df.columns:
+        # Se fitness/fatigue ainda não foram injetados no dataframe, calcula
+        df["fitness"] = [calculate_fitness(df.iloc[:i+1]) for i in range(len(df))]
+        df["fatigue"] = [calculate_fatigue(df.iloc[:i+1]) for i in range(len(df))]
+
+    last_row = df.iloc[-1]
+    last_ctl = float(last_row.get("fitness", 0))
+    last_atl = float(last_row.get("fatigue", 0))
+    last_date = pd.to_datetime(last_row["date"])
+
+    proj_rows = []
+
+    for item in future_schedule:
+        item_date = pd.to_datetime(item["date"])
+        if item_date <= last_date:
+            continue
+
+        load = float(item.get("training_load", 0))
+
+        # Modelo Banister de Decay
+        last_ctl = last_ctl + (load - last_ctl) / 42.0
+        last_atl = last_atl + (load - last_atl) / 7.0
+        form = last_ctl - last_atl
+
+        proj_rows.append({
+            "date": item_date,
+            "fitness": round(last_ctl, 1),
+            "fatigue": round(last_atl, 1),
+            "form": round(form, 1),
+            "is_future": True
+        })
+
+    return pd.DataFrame(proj_rows)
+
+
+# ============================================
 # CONFIG
 # ============================================
 
@@ -47,6 +93,7 @@ data = collect_all_data()
 metrics = extract_metrics(data)
 
 history = data.get("history", [])
+future_schedule = data.get("future_schedule", [])
 history_df = pd.DataFrame(history)
 
 if not history_df.empty and "date" in history_df.columns:
@@ -54,11 +101,10 @@ if not history_df.empty and "date" in history_df.columns:
     history_df = history_df.sort_values("date").reset_index(drop=True)
 
 # ------------------------------------------------------------------
-# TRATAMENTO DE SONO (EVITA ZERO DO DIA EM ABERTO DA GARMIN)
+# TRATAMENTO DE SONO
 # ------------------------------------------------------------------
 current_sleep = metrics.get("sleep_hours")
 
-# 1. Se o sono atual vier 0.0 ou None, resgata o último valor válido do histórico recente
 if not current_sleep or float(current_sleep) == 0:
     if not history_df.empty and "sleep_hours" in history_df.columns:
         valid_sleep_series = history_df[history_df["sleep_hours"] > 0]["sleep_hours"]
@@ -66,12 +112,11 @@ if not current_sleep or float(current_sleep) == 0:
             current_sleep = float(valid_sleep_series.iloc[-1])
             metrics["sleep_hours"] = current_sleep
 
-# 2. Atualiza a última linha do history_df para não distorcer o cálculo do Sleep Debt
 if not history_df.empty and "sleep_hours" in history_df.columns and current_sleep:
     if history_df.iloc[-1]["sleep_hours"] == 0:
         history_df.loc[history_df.index[-1], "sleep_hours"] = float(current_sleep)
 
-# Salva métricas já tratadas no histórico
+metrics = prepare_metrics(metrics)
 save_metrics(metrics)
 
 # ============================================
@@ -86,6 +131,12 @@ recommendation = daily_recommendation(recovery_score, acwr)
 fitness = calculate_fitness(history_df)
 fatigue = calculate_fatigue(history_df)
 form = calculate_form(fitness, fatigue)
+
+# Injeta colunas dinâmicas para o histórico acumulado
+if not history_df.empty:
+    history_df["fitness"] = [calculate_fitness(history_df.iloc[:i+1]) for i in range(len(history_df))]
+    history_df["fatigue"] = [calculate_fatigue(history_df.iloc[:i+1]) for i in range(len(history_df))]
+    history_df["form"] = history_df["fitness"] - history_df["fatigue"]
 
 # ============================================
 # RECOVERY ENGINE
@@ -125,13 +176,12 @@ st.header("📊 Métricas")
 
 col1, col2, col3 = st.columns(3)
 
-# Exibição do sono tratado
 sleep_val = metrics.get("sleep_hours")
 sleep_display = f"{round(sleep_val, 2)} h" if sleep_val is not None else "Sincronizando..."
 
 with col1:
     st.metric("😴 Sono", sleep_display)
-    st.metric("👣 Passos", metrics.get("steps", 0))
+    st.metric("👣 Passos", metrics.get("steps_display", "Sincronizando..."))
 
 with col2:
     st.metric("❤️ FC repouso", f"{metrics.get('resting_hr', 0)} bpm" if metrics.get('resting_hr') else "--")
@@ -241,19 +291,19 @@ with col12:
     st.metric("Risco de fadiga", risk)
 
 # ============================================
-# FITNESS / FATIGUE / FORM
+# FITNESS / FATIGUE / FORM (COM GRÁFICO TIPO STRAVA)
 # ============================================
 
 st.divider()
-st.header("🏋️ Fitness / Fatigue / Form")
+st.header("🏋️ Fitness / Fatigue / Form & Projeção Tapering")
 
 col13, col14, col15 = st.columns(3)
 
 with col13:
-    st.metric("Fitness", round(fitness, 1))
+    st.metric("Fitness (CTL)", round(fitness, 1))
 
 with col14:
-    st.metric("Fatigue", round(fatigue, 1))
+    st.metric("Fatigue (ATL)", round(fatigue, 1))
 
 with col15:
     if form >= 10:
@@ -264,7 +314,64 @@ with col15:
         status = "🟠 Fadiga moderada"
     else:
         status = "🔴 Recuperação necessária"
-    st.metric("Form", f"{round(form, 1)} ({status})")
+    st.metric("Form (TSB)", f"{round(form, 1)} ({status})")
+
+# RENDERIZANDO O GRÁFICO CONTINUO + PROJEÇÃO
+if not history_df.empty:
+    proj_df = calculate_projection(history_df, future_schedule)
+    fig_fff = go.Figure()
+
+    # --- HISTÓRICO REAL (LINHAS SÓLIDAS) ---
+    fig_fff.add_trace(go.Scatter(
+        x=history_df["date"], y=history_df["fitness"],
+        mode="lines", name="Fitness (CTL)", line=dict(color="#FF5722", width=2.5)
+    ))
+    fig_fff.add_trace(go.Scatter(
+        x=history_df["date"], y=history_df["fatigue"],
+        mode="lines", name="Fatigue (ATL)", line=dict(color="#9E9E9E", width=1.5)
+    ))
+    fig_fff.add_trace(go.Scatter(
+        x=history_df["date"], y=history_df["form"],
+        mode="lines", name="Form (TSB)", line=dict(color="#00796B", width=2.5)
+    ))
+
+    # --- PROJEÇÃO CALENDÁRIO (LINHAS PONTILHADAS) ---
+    if not proj_df.empty:
+        last_real = history_df.iloc[[-1]]
+        proj_extended = pd.concat([last_real, proj_df], ignore_index=True)
+
+        fig_fff.add_trace(go.Scatter(
+            x=proj_extended["date"], y=proj_extended["fitness"],
+            mode="lines", name="Fitness (Projeção)", line=dict(color="#FF5722", width=2, dash="dot"),
+            showlegend=False
+        ))
+        fig_fff.add_trace(go.Scatter(
+            x=proj_extended["date"], y=proj_extended["fatigue"],
+            mode="lines", name="Fatigue (Projeção)", line=dict(color="#9E9E9E", width=1.5, dash="dot"),
+            showlegend=False
+        ))
+        fig_fff.add_trace(go.Scatter(
+            x=proj_extended["date"], y=proj_extended["form"],
+            mode="lines", name="Form (Projeção Tapering)", line=dict(color="#00796B", width=2, dash="dot"),
+            showlegend=False
+        ))
+
+    # Faixa verde de Sweet Spot para o dia da prova (+10 a +25)
+    fig_fff.add_hrect(
+        y0=10, y1=25, fillcolor="green", opacity=0.1, line_width=0,
+        annotation_text="Zona Ideal de Prova (Freshness)", annotation_position="top left"
+    )
+
+    fig_fff.update_layout(
+        title="Fitness & Freshness (Evolução + Treinos Futuros Garmin)",
+        xaxis_title="Data",
+        yaxis_title="Pontuação",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        margin=dict(l=20, r=20, t=50, b=20)
+    )
+
+    st.plotly_chart(fig_fff, use_container_width=True)
 
 # ============================================
 # PERFORMANCE TREND

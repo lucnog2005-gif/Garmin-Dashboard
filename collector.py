@@ -37,22 +37,83 @@ def fetch_valid_sleep_seconds(client, day_str):
     return 0
 
 
+def get_future_schedule(client, days=35):
+    """
+    Busca treinos agendados no calendário da Garmin para os próximos dias.
+    """
+    if not client:
+        return []
+
+    future_events = []
+    today = datetime.now().date()
+    future_date = today + timedelta(days=days)
+
+    try:
+        # Busca eventos do calendário
+        calendar_events = client.get_calendar(today.isoformat(), future_date.isoformat())
+        
+        # Pode vir como lista de eventos ou dicionário envelopado dependendo da resposta da API
+        events_list = calendar_events.get("calendarItems", []) if isinstance(calendar_events, dict) else (calendar_events or [])
+
+        for item in events_list:
+            event_date = item.get("date") or item.get("startDate")
+            if not event_date:
+                continue
+
+            # Se for data passada/hoje, ignora para não duplicar com o histórico real
+            item_date = datetime.strptime(event_date[:10], "%Y-%m-%d").date()
+            if item_date <= today:
+                continue
+
+            # Tenta pegar a carga estimada ou calcula com base na duração/distância estipulada
+            est_load = item.get("estimatedTrainingLoad") or 0
+            if est_load == 0:
+                duration_min = (item.get("durationInSeconds") or 0) / 60
+                distance_km = (item.get("distanceInMeters") or 0) / 1000
+                # Estimativa genérica de carga caso o Garmin não retorne o valor pronto
+                est_load = round((duration_min * 0.8) + (distance_km * 2.0), 1)
+
+            future_events.append({
+                "date": item_date.strftime("%Y-%m-%d"),
+                "item_name": item.get("title", "Treino Agendado"),
+                "training_load": est_load,
+                "is_future": True
+            })
+
+    except Exception:
+        pass
+
+    return sorted(future_events, key=lambda x: x["date"])
+
+
 # ============================================
-# HISTÓRICO DE ATIVIDADES
+# HISTÓRICO DE ATIVIDADES (180 DIAS - 6 MESES)
 # ============================================
 
 @st.cache_data(ttl=1800)
-def get_historical_activities(_client, days=30):
+def get_historical_activities(_client, days=180):
     if not _client:
         return []
 
     history = []
 
+    # Otimização contra Rate Limit (429): Busca um lote das últimas 200 atividades de uma vez só
+    try:
+        all_activities = _client.get_activities(0, 200)
+        # Agrupa atividades por data para acesso rápido em O(1)
+        activities_by_day = {}
+        for act in all_activities:
+            act_date = act.get("startTimeLocal", "")[:10]
+            if act_date and act_date not in activities_by_day:
+                activities_by_day[act_date] = act
+    except Exception:
+        activities_by_day = {}
+
     for i in range(days):
         day = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
 
         try:
-            # Busca resumo diário do usuário
+            # Busca resumo diário do usuário (Passos, Sono, Stress, FC)
             try:
                 stats = _client.get_user_summary(day)
             except Exception:
@@ -64,13 +125,8 @@ def get_historical_activities(_client, days=30):
             except Exception:
                 hrv_data = {}
 
-            # Busca atividades do dia
-            try:
-                activities = _client.get_activities_by_date(day, day, "")
-            except Exception:
-                activities = []
-
-            last_activity = activities[0] if activities else {}
+            # Atividade do dia reaproveitada da busca em lote
+            last_activity = activities_by_day.get(day, {})
 
             # ====================================
             # SONO (COM FALLBACK PARA O DIA DE HOJE)
@@ -87,7 +143,6 @@ def get_historical_activities(_client, days=30):
                 0
             )
 
-            # Se for hoje (i = 0) e o registro de sono ainda for 0, busca a noite recém-concluída (ontem)
             if (not sleep_seconds or sleep_seconds == 0) and i == 0:
                 yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
                 sleep_seconds = fetch_valid_sleep_seconds(_client, yesterday_str)
@@ -95,31 +150,11 @@ def get_historical_activities(_client, days=30):
             sleep_hours = round(float(sleep_seconds) / 3600, 2)
 
             # ====================================
-            # PASSOS
+            # PASSOS / STRESS / REPOUSO
             # ====================================
-            steps = get_first_valid(
-                stats,
-                ["totalSteps", "steps", "dailySteps"],
-                0
-            )
-
-            # ====================================
-            # STRESS
-            # ====================================
-            stress = get_first_valid(
-                stats,
-                ["averageStressLevel", "stressAverage", "avgStressLevel"],
-                0
-            )
-
-            # ====================================
-            # FC REPOUSO
-            # ====================================
-            resting_hr = get_first_valid(
-                stats,
-                ["restingHeartRate", "restingHR"],
-                0
-            )
+            steps = get_first_valid(stats, ["totalSteps", "steps", "dailySteps"], 0)
+            stress = get_first_valid(stats, ["averageStressLevel", "stressAverage", "avgStressLevel"], 0)
+            resting_hr = get_first_valid(stats, ["restingHeartRate", "restingHR"], 0)
 
             # ====================================
             # HRV
@@ -134,22 +169,13 @@ def get_historical_activities(_client, days=30):
             # ====================================
             # TRAINING EFFECT & DISTÂNCIA
             # ====================================
-            training_effect = float(
-                last_activity.get("aerobicTrainingEffect", 0) or 0
-            )
-
-            distance_km = round(
-                last_activity.get("distance", 0) / 1000,
-                2
-            )
+            training_effect = float(last_activity.get("aerobicTrainingEffect", 0) or 0)
+            distance_km = round(last_activity.get("distance", 0) / 1000, 2)
 
             # ====================================
             # TRAINING LOAD
             # ====================================
-            training_load = round(
-                (training_effect * 8) + (distance_km * 1.5),
-                1
-            )
+            training_load = round((training_effect * 8) + (distance_km * 1.5), 1)
 
             # ====================================
             # VO2 MAX
@@ -197,7 +223,7 @@ def collect_all_data():
     client = get_garmin_client()
 
     if not client:
-        return {"stats": {}, "activities": [], "history": []}
+        return {"stats": {}, "activities": [], "history": [], "future_schedule": []}
 
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -206,7 +232,6 @@ def collect_all_data():
     except Exception:
         stats = {}
 
-    # Garante que o stats de hoje contenha as horas de sono caso venha 0
     current_sleep = get_first_valid(
         stats,
         ["measurableAsleepDuration", "sleepingSeconds", "sleepSeconds", "dailySleepSeconds", "sleepDuration"],
@@ -226,5 +251,6 @@ def collect_all_data():
     return {
         "stats": stats,
         "activities": activities,
-        "history": get_historical_activities(client, days=30)
+        "history": get_historical_activities(client, days=180),
+        "future_schedule": get_future_schedule(client, days=35)
     }

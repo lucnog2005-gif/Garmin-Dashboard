@@ -21,17 +21,25 @@ def process_daily_stats(raw_stats):
     today_str = str(date.today())
     is_today = raw_stats.get('calendarDate') == today_str
     
-    sleep_sec = raw_stats.get('measurableAsleepDuration') or 0
-    sleep_hours = round(sleep_sec / 3600, 2)
+    # Duração do sono
+    sleep_sec = get_first_available(
+        raw_stats, 
+        ['measurableAsleepDuration', 'sleepingSeconds', 'sleepSeconds', 'totalSleepSeconds', 'sleepTimeSeconds'], 
+        0
+    )
     
-    # Se for hoje e ainda der 0 horas (madrugada), marca como em andamento
-    sleep_display = f"{sleep_hours}h" if not (is_today and sleep_hours == 0) else "Sincronizando..."
+    sleep_hours = round(sleep_sec / 3600, 2) if sleep_sec > 0 else None
+
+    # Formatação de Passos
+    steps_val = raw_stats.get('totalSteps') or 0
+    steps_display = f"{steps_val:,}".replace(",", ".") if steps_val > 0 else "Sincronizando..."
 
     return {
         "date": raw_stats.get('calendarDate'),
         "sleep_hours": sleep_hours,
-        "sleep_display": sleep_display,
-        "steps": raw_stats.get('totalSteps') or 0,
+        "sleep_display": f"{sleep_hours}h" if sleep_hours else "Sincronizando...",
+        "steps": steps_val,
+        "steps_display": steps_display,
         "resting_hr": raw_stats.get('restingHeartRate'),
         "stress": raw_stats.get('averageStressLevel'),
         "is_today": is_today
@@ -71,20 +79,35 @@ def extract_metrics(data):
     )
 
     # ========================================
-    # SLEEP
+    # SLEEP (MAPEAMENTO ROBUSTO)
     # ========================================
 
     sleeping_seconds = get_first_available(
         stats,
-        ["sleepingSeconds", "sleepSeconds", "totalSleepSeconds"],
+        [
+            "sleepingSeconds", 
+            "sleepSeconds", 
+            "totalSleepSeconds", 
+            "measurableAsleepDuration", 
+            "sleepTimeSeconds"
+        ],
         0
     )
 
-    sleep_hours = round(sleeping_seconds / 3600, 2)
-
-    # Se ainda é madrugada e a Garmin não consolidou o sono
-    if sleeping_seconds == 0 and datetime.now().hour < 5:
-        sleep_hours = None
+    if sleeping_seconds > 0:
+        sleep_hours = round(sleeping_seconds / 3600, 2)
+    else:
+        # Tenta buscar diretamente de dados de sono brutos se existirem
+        raw_sleep = data.get("sleep_data", {})
+        sleep_sec_raw = get_first_available(
+            raw_sleep, 
+            ["sleepTimeSeconds", "totalSleepSeconds", "measurableAsleepDuration"], 
+            0
+        )
+        if sleep_sec_raw > 0:
+            sleep_hours = round(sleep_sec_raw / 3600, 2)
+        else:
+            sleep_hours = None  # Mantem como None para o app.py resgatar o ultimo dia valido
 
     # ========================================
     # STEPS
@@ -95,6 +118,7 @@ def extract_metrics(data):
         ["totalSteps", "steps"],
         0
     )
+    steps_display = f"{steps:,}".replace(",", ".") if steps > 0 else "Sincronizando..."
 
     # ========================================
     # STRESS
@@ -178,6 +202,7 @@ def extract_metrics(data):
         "date": datetime.now().strftime("%Y-%m-%d"),
         "sleep_hours": sleep_hours,
         "steps": steps,
+        "steps_display": steps_display,
         "stress_avg": stress_avg,
         "resting_hr": resting_hr,
         "hrv": hrv,
@@ -209,8 +234,8 @@ def extract_metrics(data):
 
 def prepare_metrics(metrics):
     defaults = {
-        "sleep_hours": 0,
         "steps": 0,
+        "steps_display": "Sincronizando...",
         "resting_hr": 0,
         "stress_avg": 0,
         "vo2max": 0,
@@ -218,6 +243,10 @@ def prepare_metrics(metrics):
         "training_load": 0,
         "hrv": 0
     }
+
+    # Evita forcar sleep_hours para 0 se ele for None (para permitir fallback)
+    if "sleep_hours" not in metrics:
+        metrics["sleep_hours"] = None
 
     for key, value in defaults.items():
         if key not in metrics or metrics[key] is None:
